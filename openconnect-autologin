@@ -1,0 +1,149 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Logs in to Cisco AnyConnect VPNs in NetworkManager with a login saved in the
+# keyring, so you never type your password or one-time code.
+#
+#   openconnect-autologin --store https://sslvpn.ethz.ch/staff-net  save a login
+#   openconnect-autologin --connect "ETH VPN"                      connect (any desktop)
+#   openconnect-autologin -u UUID ...                              called by GNOME Shell
+
+SERVICE=openconnect-autologin
+STOCK_DIALOG=${STOCK_DIALOG:-$(sed -n 's/^auth-dialog=//p' /usr/lib/NetworkManager/VPN/nm-openconnect-service.name)}
+
+# Keyring secret is four lines: username, password, TOTP secret, group.
+# The last two may be empty. Swap these out to use another password manager.
+cred_lookup() { timeout 60 secret-tool lookup service "$SERVICE" gateway "$1"; }
+cred_store()  { secret-tool store --label="VPN login for $1" service "$SERVICE" gateway "$1"; }
+
+fail() {
+    echo "VPN login failed: ${1:-unknown error}" >&2
+    notify-send -i network-vpn-symbolic "VPN login failed" "${1:-unknown error}" 2>/dev/null
+    exit 1
+}
+
+# "sslvpn.ethz.ch/staff-net/" and "https://sslvpn.ethz.ch/staff-net" are the same gateway
+normalize() {
+    local url=${1%/}
+    [[ $url == *://* ]] || url=https://$url
+    echo "$url"
+}
+
+# nmcli prints "gateway = https\://sslvpn.ethz.ch/staff-net, useragent = AnyConnect, ..."
+vpn_data() {
+    nmcli -g vpn.data connection show uuid "$1" 2>/dev/null |
+        sed 's/, \([[:alnum:]_-]* = \)/\n\1/g; s/\\\(.\)/\1/g'
+}
+get() { sed -n "s/^ *$1 = //p" <<<"$data"; }
+
+# Logs in to the VPN connection $1 and sets COOKIE, CONNECT_URL, FINGERPRINT
+# and RESOLVE. Returns 2 if there is no saved login for it.
+login() {
+    data=$(vpn_data "$1")
+    local gateway cred user pass totp group ua proto out opts
+    gateway=$(get gateway)
+
+    cred=$([[ $gateway ]] && cred_lookup "$(normalize "$gateway")" 2>"$tmp/err")
+    case $? in
+        0) ;;
+        1) [[ -s $tmp/err ]] && fail "Keyring: $(<"$tmp/err")"
+           return 2 ;;
+        124) fail "No answer from the keyring. Is it locked?" ;;
+        *) fail "Keyring lookup failed." ;;
+    esac
+    { IFS= read -r user; IFS= read -r pass; IFS= read -r totp; IFS= read -r group; } <<<"$cred"
+
+    opts=(--authenticate --no-external-auth --non-inter --passwd-on-stdin -u "$user")
+    [[ $group ]] && opts+=(--authgroup="$group")
+    ua=$(get useragent) && [[ $ua ]] && opts+=(--useragent="$ua")
+    proto=$(get protocol) && [[ $proto ]] && opts+=(--protocol="$proto")
+
+    if [[ $totp ]]; then
+        totp=${totp// /}
+        [[ $totp == base32:* ]] || totp="base32:$totp"
+        # through a file so the secret doesn't show up in ps
+        printf '%s' "$totp" >"$tmp/totp"
+        opts+=(--token-mode=totp --token-secret="@$tmp/totp")
+    fi
+
+    out=$(printf '%s\n' "$pass" | openconnect "${opts[@]}" "$gateway" 2>"$tmp/err") \
+        || fail "$(grep . "$tmp/err" | tail -n 1)"
+
+    COOKIE= CONNECT_URL= FINGERPRINT= RESOLVE=
+    eval "$(grep -E '^(COOKIE|CONNECT_URL|FINGERPRINT|RESOLVE)=' <<<"$out")"
+    [[ $COOKIE && $CONNECT_URL && $FINGERPRINT ]] || fail "openconnect did not return a cookie."
+}
+
+store() {
+    local gateway user pass totp group ua name uuid
+    gateway=$(normalize "${1:?usage: $0 --store https://sslvpn.ethz.ch/staff-net}")
+    IFS= read -rp "Username: " user
+    IFS= read -rsp "Password: " pass; echo
+    IFS= read -rsp "TOTP secret, not the 6-digit code (e.g. JBSWY3DPEHPK3PXP, leave empty if none): " totp; echo
+    if [[ $totp =~ ^[0-9]{6,8}$ ]]; then
+        echo "That looks like a one-time code. Enter the secret behind the QR code instead." >&2
+        exit 1
+    fi
+    IFS= read -rp "Group from the group list (leave empty if none): " group
+    IFS= read -rp "User agent [AnyConnect]: " ua
+    printf '%s\n%s\n%s\n%s' "$user" "$pass" "$totp" "$group" | cred_store "$gateway" || exit
+
+    for uuid in $(nmcli -g UUID,TYPE connection show | sed -n 's/:vpn$//p'); do
+        data=$(vpn_data "$uuid")
+        [[ $(normalize "$(get gateway)") == "$gateway" ]] && break
+        uuid=
+    done
+    if [[ $uuid ]]; then
+        nmcli connection modify uuid "$uuid" +vpn.data "useragent=${ua:-AnyConnect}"
+    else
+        IFS= read -rp "Name for the new VPN connection [${gateway#*://}]: " name
+        nmcli connection add type vpn vpn-type openconnect con-name "${name:-${gateway#*://}}" \
+            vpn.data "gateway=$gateway, protocol=anyconnect, useragent=${ua:-AnyConnect}, cookie-flags=2, gateway-flags=2, gwcert-flags=2" \
+            >/dev/null && echo "Created the VPN connection."
+    fi
+}
+
+# Hands the login to NetworkManager directly, so no desktop is involved.
+connect() {
+    local uuid
+    uuid=$(nmcli -g connection.uuid connection show id "${1:?usage: $0 --connect \"ETH VPN\"}" 2>/dev/null) ||
+        fail "No VPN connection named \"$1\"."
+    login "$uuid" || fail "No saved login for \"$1\". Run $0 --store first."
+    nmcli connection up uuid "$uuid" passwd-file <(
+        printf 'vpn.secrets.%s:%s\n' cookie "$COOKIE" gateway "$CONNECT_URL" gwcert "$FINGERPRINT"
+        [[ $RESOLVE ]] && printf 'vpn.secrets.resolve:%s\n' "$RESOLVE"
+    )
+}
+
+# GNOME Shell (and nm-applet) run this as the VPN's auth dialog: settings come
+# in on stdin until DONE, we answer with key/value lines and a blank line, then
+# wait for QUIT. VPNs without a saved login go to the normal dialog.
+auth_dialog() {
+    local uuid args=("$@")
+    while (($#)); do
+        [[ $1 == -u ]] && uuid=$2
+        shift
+    done
+    if ! login "$uuid"; then
+        rm -rf "$tmp"
+        exec "$STOCK_DIALOG" "${args[@]}"
+    fi
+    while read -r line && [[ $line != DONE ]]; do :; done
+    printf '%s\n' gateway "$CONNECT_URL" cookie "$COOKIE" gwcert "$FINGERPRINT"
+    [[ $RESOLVE ]] && printf '%s\n' resolve "$RESOLVE"
+    printf '\n\n'
+    while read -r line && [[ $line != QUIT ]]; do :; done
+}
+
+if [[ $1 == --store ]]; then
+    store "$2"
+    exit
+fi
+
+tmp=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/vpn.XXXXXX") || fail "Could not create temp dir."
+trap 'rm -rf "$tmp"' EXIT
+
+if [[ $1 == --connect ]]; then
+    connect "$2"
+else
+    auth_dialog "$@"
+fi
