@@ -16,7 +16,8 @@ cred_lookup() { timeout 60 secret-tool lookup service "$SERVICE" gateway "$1"; }
 cred_store()  { secret-tool store --label="VPN login for $1" service "$SERVICE" gateway "$1"; }
 
 fail() {
-    echo "VPN login failed: ${1:-unknown error}" >&2
+    # GNOME Shell closes our stderr, and writing to it would kill the script
+    [[ -t 2 ]] && echo "VPN login failed: ${1:-unknown error}" >&2
     notify-send -i network-vpn-symbolic "VPN login failed" "${1:-unknown error}" 2>/dev/null
     exit 1
 }
@@ -65,8 +66,12 @@ login() {
         opts+=(--token-mode=totp --token-secret="@$tmp/totp")
     fi
 
-    out=$(printf '%s\n' "$pass" | openconnect "${opts[@]}" "$gateway" 2>"$tmp/err") \
-        || fail "$(grep . "$tmp/err" | tail -n 1)"
+    out=$(printf '%s\n' "$pass" | timeout 30 openconnect "${opts[@]}" "$gateway" 2>"$tmp/err")
+    case $? in
+        0) ;;
+        124) fail "No answer from the VPN server." ;;
+        *) fail "$(grep . "$tmp/err" | tail -n 1)" ;;
+    esac
 
     COOKIE= CONNECT_URL= FINGERPRINT= RESOLVE=
     eval "$(grep -E '^(COOKIE|CONNECT_URL|FINGERPRINT|RESOLVE)=' <<<"$out")"
@@ -83,9 +88,10 @@ store() {
         echo "That looks like a one-time code. Enter the secret behind the QR code instead." >&2
         exit 1
     fi
-    IFS= read -rp "Group from the group list (leave empty if none): " group
-    IFS= read -rp "User agent [AnyConnect]: " ua
+    IFS= read -rp "Group from the group list (leave empty if unsure): " group
+    IFS= read -rp "User agent [AnyConnect] (press Enter if unsure): " ua
     printf '%s\n%s\n%s\n%s' "$user" "$pass" "$totp" "$group" | cred_store "$gateway" || exit
+    echo "Saved the login for $gateway."
 
     for uuid in $(nmcli -g UUID,TYPE connection show | sed -n 's/:vpn$//p'); do
         data=$(vpn_data "$uuid")
@@ -93,12 +99,13 @@ store() {
         uuid=
     done
     if [[ $uuid ]]; then
-        nmcli connection modify uuid "$uuid" +vpn.data "useragent=${ua:-AnyConnect}"
+        nmcli connection modify uuid "$uuid" +vpn.data "useragent=${ua:-AnyConnect}" &&
+            echo "Updated the VPN connection \"$(nmcli -g connection.id connection show uuid "$uuid")\"."
     else
         IFS= read -rp "Name for the new VPN connection [${gateway#*://}]: " name
         nmcli connection add type vpn vpn-type openconnect con-name "${name:-${gateway#*://}}" \
             vpn.data "gateway=$gateway, protocol=anyconnect, useragent=${ua:-AnyConnect}, cookie-flags=2, gateway-flags=2, gwcert-flags=2" \
-            >/dev/null && echo "Created the VPN connection."
+            >/dev/null && echo "Created the VPN connection. Log out and back in before using it."
     fi
 }
 

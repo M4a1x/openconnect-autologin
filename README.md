@@ -52,14 +52,14 @@ It asks for:
 - **Username**, e.g. `jdoe@staff-net.ethz.ch`
 - **Password**: your VPN password (ETH: your network password)
 - **TOTP secret**: the secret behind the QR code you scanned into your authenticator app, e.g. `JBSWY3DPEHPK3PXP` (spaces are ignored). **Not** the 6-digit code that changes every 30 seconds. Password managers like Bitwarden can show the secret. Leave it empty if your VPN doesn't use one-time codes.
-- **Group from the group list**: only if the official client makes you pick a group from a list, e.g. `RWTH-VPN (Split Tunnel)`. Leave it empty for ETH.
-- **User agent**: press Enter to keep the default `AnyConnect`.
+- **Group from the group list**: only if the official client makes you pick a group from a list, e.g. `RWTH-VPN (Split Tunnel)`. Leave it empty if unsure, and for ETH.
+- **User agent**: press Enter to keep the default `AnyConnect`, especially if unsure.
 
 If there is no VPN connection with this address yet, it creates one for you. Run the command again whenever your password changes, and once for every group you use (e.g. `staff-net` and `student-net`).
 
 You can check that the login was saved in your chosen keyring. By default this is `Seahorse` in the Gnome GUI.
 
-**3. Log out and back in.**
+**3. Log out and back in.** This is needed after installing and every time `--store` creates a new VPN connection.
 
 **4. Connect** with the VPN switch in the quick settings menu.
 
@@ -78,10 +78,11 @@ $ ~/.local/bin/openconnect-autologin --store https://sslvpn.ethz.ch/staff-net
 Username: jdoe@staff-net.ethz.ch
 Password:
 TOTP secret, not the 6-digit code (e.g. JBSWY3DPEHPK3PXP, leave empty if none):
-Group from the group list (leave empty if none):
-User agent [AnyConnect]:
+Group from the group list (leave empty if unsure):
+User agent [AnyConnect] (press Enter if unsure):
+Saved the login for https://sslvpn.ethz.ch/staff-net.
 Name for the new VPN connection [sslvpn.ethz.ch/staff-net]: ETH VPN
-Created the VPN connection.
+Created the VPN connection. Log out and back in before using it.
 ```
 
 The username is always your ETH username, `@`, the group, and `.ethz.ch`. Leave the group question empty and keep the `AnyConnect` user agent; ETH requires it. After logging out and back in, "ETH VPN" shows up under VPN in the quick settings menu (in the top right usually).
