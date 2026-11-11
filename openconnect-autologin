@@ -99,12 +99,12 @@ store() {
         uuid=
     done
     if [[ $uuid ]]; then
-        nmcli connection modify uuid "$uuid" +vpn.data "useragent=${ua:-AnyConnect}" &&
+        nmcli connection modify uuid "$uuid" +vpn.data "useragent=${ua:-AnyConnect}, resolve-flags=2" &&
             echo "Updated the VPN connection \"$(nmcli -g connection.id connection show uuid "$uuid")\"."
     else
         IFS= read -rp "Name for the new VPN connection [${gateway#*://}]: " name
         nmcli connection add type vpn vpn-type openconnect con-name "${name:-${gateway#*://}}" \
-            vpn.data "gateway=$gateway, protocol=anyconnect, useragent=${ua:-AnyConnect}, cookie-flags=2, gateway-flags=2, gwcert-flags=2" \
+            vpn.data "gateway=$gateway, protocol=anyconnect, useragent=${ua:-AnyConnect}, cookie-flags=2, gateway-flags=2, gwcert-flags=2, resolve-flags=2" \
             >/dev/null && echo "Created the VPN connection. Log out and back in before using it."
     fi
 }
@@ -125,11 +125,20 @@ connect() {
 # in on stdin until DONE, we answer with key/value lines and a blank line, then
 # wait for QUIT. VPNs without a saved login go to the normal dialog.
 auth_dialog() {
-    local uuid args=("$@")
+    local uuid interactive args=("$@")
     while (($#)); do
         [[ $1 == -u ]] && uuid=$2
+        [[ $1 == -i ]] && interactive=1
         shift
     done
+    # NM asks without -i first, then with -i. Logging in both times reuses the
+    # TOTP code, which the server rejects, so answer "nothing stored" first.
+    if [[ ! $interactive ]]; then
+        while read -r line && [[ $line != DONE ]]; do :; done
+        printf '\n\n'
+        while read -r line && [[ $line != QUIT ]]; do :; done
+        return
+    fi
     if ! login "$uuid"; then
         rm -rf "$tmp"
         exec "$STOCK_DIALOG" "${args[@]}"

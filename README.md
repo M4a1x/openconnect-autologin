@@ -128,6 +128,8 @@ If that prints nothing, restart your computer.
 
 **Any other "VPN login failed" message** shows openconnect's error. Usually the password or TOTP secret is wrong; save them again with `--store`.
 
+**"Connect automatically" doesn't log in.** Each one-time code works only once, so the login runs only when NetworkManager allows interaction (clicking the switch), not for automatic or secondary connections.
+
 **It stopped working after a system update.** Run `./install.sh` again.
 
 ## How it works
